@@ -263,7 +263,7 @@ Kubernetes项目最主要的设计思想，以统一的方式抽象底层基础�
 
 **使用这种方法就是所谓的声明式API**，这个事Kubernetes最核心的设计理念
 
-#### 第四章 Kubernetes集群搭建与配置
+### 第四章 Kubernetes集群搭建与配置
 
 #### 4.1 Kubernetes部署利器：kubeadm
 
@@ -412,4 +412,579 @@ kubeadm为其他组件生成访问kebe-apiserver所需的配置文件
 
 - 路径``etc/kubernetes/xxx.conf``
 - 记录了当前这个Master节点的服务器地址、监听端口、证书目录等信息，对应的客户端（比如scheduler、kubelet等）可以直接加载对应的文件，使用其中的信息与kube-apiserver建立安全连接
+
+- 接下来kubeadm会为Master组件生成Pod配置文件
+
+**此时Kubernetes集群不存在，难道kubeadm会直接执行docker run来启动这些容器吗**
+
+- 不会，Kubernetes中有一种特殊的容器启动方法，叫做“Static Pod”
+- 允许你把要部署的Pod的YAML文件放在一个指定的目录中
+- 这样当这台机器上kubelet启动时，它会自动检查该目录，加载所有Pod YAML文件并在这台机器上启动它们
+
+Pod的YAML文件，Master组件的YAML文件都在``/etc/kubernetes/manifests``路径里面
+
+- Pod里只定义了一个容器，使用的镜像时：k8s.gcr.io/kube-apiserver-amd64:v1.18.8，这是Kubernetes官方维护的一个组件镜像
+
+- 这个容器的启动命令是kube-apiserver --authorization-mode=Node,....很长的命令，其实，它就是容器里kube-apiserver这个二进制文件再加上指定的配置参数
+- 如果要修改一个已有集群的kube-apiserver的配置，需要修改这个YAML文件
+- 这些组件的参数也可以在部署时指定
+
+完成以上之后，kubeadm还会生成一个etcd的Pod YAML文件，同样用Static Pod的方式启动etcd
+
+```bash
+louis1@louis1:~$ ls /etc/kubernetes/manifests/
+etcd.yaml  kube-apiserver.yaml  kube-controller-manager.yaml  kube-scheduler.yaml
+```
+
+一旦这些YAML文件出现在被kubelet监视的``/etc/kubernetes/manifests``下，kubelet就会自动创建这些YAML文件中定义的Pod，即Master组件的容器
+
+**Master容器启动后，kubeadm会通过检查localhost:6443/healthz这个Master组件的健康来检查URL**
+
+等Master组件完全运行起来之后，kubeadm会为集群生成一个bootstrap token，之后只要持有这个token，任何安装了kubelet和kubeadm的节点都可以通过**kubeadm join**加入这个集群
+
+当token生成之后，kubeadm会将ca.crt等Master节点的重要信息，**通过ConfigMap的方式保存在etcd当中，供后续部署Node节点使用**
+
+- ConfigMap名字是cluster-info
+
+**kubeadm init的最后一步是安装默认插件**
+
+- 必须安装kube-proxy和DNS这俩插件
+- 分别用来提供整个集群的服务发现和DNS功能
+- 其实也就是两个容器镜像，用Kubernetes客户端创建两个Pod就可以了
+
+##### 4.1.3 kubeadm join的工作流程
+
+为什么执行kubeadm join需要token？
+
+- 因为任何一台机器想要成为Kubernetes集群中的一个节点，就必须在集群的kube-apiserver上注册
+
+可是想要跟apiserver打交道，这个机器就必须获取相应的证书文件，**为了能够一键安装**，kubeadm至少需要发起一次**非安全模式**的访问到kube-apiserver，从而拿到保存在ConfigMap中的cluster-info（保存了API Server的授权信息）
+
+**在此过程中bootstrap token扮演了安全验证的角色**
+
+##### 4.1.4 配置kubeadm的部署参数
+
+当使用kubeadm init部署Master节点时，推荐使用下面的命令
+
+```bash
+kubeadm init --config kubeadm.yaml
+```
+
+#### 4.2 从0到1：搭建一个完整的Kubernetes集群
+
+**第一步：安装kubeadm和Docker**
+
+**第二步：部署Kubernetes的Master节点**
+
+如果之前开启了kubeadm，重置一下``sudo kubeadm reset``
+
+执行Kubernetes的部署``kubeadm init --config kubeadm.yaml``
+
+**Kubeadm.yaml**
+
+```bash
+apiVersion: kubeadm.k8s.io/v1beta3 #版本信息参考kubeadm config print init-defaults命令结果
+kind: ClusterConfiguration
+kubernetesVersion: 1.23.1 #根据自己安装的k8s版本来写,版本信息参考kubeadm config print init-defaults>命令结果
+imageRepository: registry.aliyuncs.com/google_containers #配置国内镜像
+
+apiServer:
+  extraArgs:
+    runtime-config: "api/all=true"
+
+#controllerManager:
+# extraArgs:
+# horizontal-pod-autoscaler-use-rest-clients: "true" #开启kube-controller-manager能够使用自定义资源>（Custom Metrics）进行自动水平扩展,但是高版本不支持该参数需要去掉。
+# horizontal-pod-autoscaler-sync-period: "10s"
+# node-monitor-grace-period: "10s"
+
+etcd:
+  local:
+    dataDir: /data/k8s/etcd
+```
+
+**如果kubeadm init的时候kubelet不能正常初始化**
+
+```bash
+[wait-control-plane] Waiting for the kubelet to boot up the control plane as static Pods from directory "/etc/kubernetes/manifests". This can take up to 4m0s
+[kubelet-check] Initial timeout of 40s passed.
+[kubelet-check] It seems like the kubelet isn't running or healthy.
+[kubelet-check] The HTTP call equal to 'curl -sSL http://localhost:10248/healthz' failed with error: Get "http://localhost:10248/healthz": dial tcp 127.0.0.1:10248: connect: connection refused.
+```
+
+kubelet起不来,根据[StackOverflow上这个帖子](https://stackoverflow.com/questions/52119985/kubeadm-init-shows-kubelet-isnt-running-or-healthy)的描述, 应该是安装kubeadm和docker后，这俩使用的cgroup驱动不一致导致。需要在指定docker的cgroup驱动为system. 具体做法为:
+
+```bash
+vim /etc/docker/daemon.json
+```
+
+```bash
+{
+        "exec-opts": ["native.cgroupdriver=systemd"],
+        "log-driver": "json-file",
+        "log-opts": {
+                "max-size": "100m"
+        }
+}
+```
+
+保存之后执行
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart docker
+```
+
+kubelet也要搞一下
+
+```bash
+sudo vi /var/lib/kubelet/config.yaml
+# 在最后加入
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+cgroupDriver: systemd
+```
+
+然后重启一下kubelet
+
+```bash
+sudo systemctl restart kubelet 
+```
+
+
+
+init成功之后生成的token
+
+```bash
+Then you can join any number of worker nodes by running the following on each as root:
+
+kubeadm join 10.211.55.8:6443 --token udthxc.9ujgk5o3qmcv8nfg \
+        --discovery-token-ca-cert-hash sha256:944335dedd3bca9bddce78a2464436e47096953f92d90dd11be83e7e9a5d232a 
+```
+
+第一次使用Kubernetes集群所需要的配置命令
+
+```bash
+mkdir -p $HOME/.kube
+sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+sudo chown $(id -u):$(id -g) $HOME/.kube/config
+```
+
+**需要这些配置的原因是，Kubernetes集群默认需要以加密方式访问**
+
+- 这几条命令是将刚刚部署生成的Kubernetes集群的安全配置文件，保存到当前用户的.kube目录下
+- kubectl默认会使用这个目录下的授权信息访问Kubernetes集群
+
+使用kubectl get命令来查看当前唯一节点的状态
+
+```bash
+louis1@louis1:~$ kubectl get nodes
+NAME     STATUS     ROLES                  AGE     VERSION
+louis1   NotReady   control-plane,master   4m55s   v1.23.1
+```
+
+在调试Kubernetes集群的时候，最重要的手段就是用kubectl describe来查看该节点的详细信息、状态和事件
+
+```bash
+louis1@louis1:~$ kubectl describe node louis1
+。。。
+Conditions:
+  Type             Status  LastHeartbeatTime                 LastTransitionTime                Reason                       Message
+  ----             ------  -----------------                 ------------------                ------                       -------
+  MemoryPressure   False   Tue, 11 Jan 2022 14:32:05 +0000   Tue, 11 Jan 2022 14:11:23 +0000   KubeletHasSufficientMemory   kubelet has sufficient memory available
+  DiskPressure     False   Tue, 11 Jan 2022 14:32:05 +0000   Tue, 11 Jan 2022 14:11:23 +0000   KubeletHasNoDiskPressure     kubelet has no disk pressure
+  PIDPressure      False   Tue, 11 Jan 2022 14:32:05 +0000   Tue, 11 Jan 2022 14:11:23 +0000   KubeletHasSufficientPID      kubelet has sufficient PID available
+  Ready            False   Tue, 11 Jan 2022 14:32:05 +0000   Tue, 11 Jan 2022 14:11:23 +0000   KubeletNotReady              container runtime network not ready: NetworkReady=false reason:NetworkPluginNotReady message:docker: network plugin is not ready: cni config uninitialized
+  。。。。
+```
+
+**出现NodeNotReady的原因是尚未部署任何网络插件**
+
+可以通过kubectl检查该节点上各个系统Pod的状态，其中kube-system是Kubernetes项目预留的系统Pod的工作空间（Namespace，这个不是Linux Namespace，而是Kubernetes划分不同工作空间的单位）
+
+```bash
+louis1@louis1:~$ kubectl get pods -n kube-system
+NAME                             READY   STATUS    RESTARTS   AGE
+coredns-6d8c4cb4d-sxfh9          0/1     Pending   0          11h
+coredns-6d8c4cb4d-x959b          0/1     Pending   0          11h
+etcd-louis1                      1/1     Running   0          11h
+kube-apiserver-louis1            1/1     Running   0          11h
+kube-controller-manager-louis1   1/1     Running   1          11h
+kube-proxy-2s9vv                 1/1     Running   0          11h
+kube-scheduler-louis1            1/1     Running   1          11h
+```
+
+可以看到依赖网络的Pod都处于Pending状态，即调度失败，符合预期，因为这个Master节点的网络尚未部署
+
+**第三步：部署网络插件**
+
+在Kubernetes项目“一切皆容器”设计理念的指导下，部署网络插件非常简单，只需要执行一条kubectl apply指令，以Weave为例
+
+```bash
+louis1@louis1:~$ kubectl apply -f "https://cloud.weave.works/k8s/net?k8s-version=$(kubectl version | base64 | tr -d '\n')"
+serviceaccount/weave-net created
+clusterrole.rbac.authorization.k8s.io/weave-net created
+clusterrolebinding.rbac.authorization.k8s.io/weave-net created
+role.rbac.authorization.k8s.io/weave-net created
+rolebinding.rbac.authorization.k8s.io/weave-net created
+daemonset.apps/weave-net created
+```
+
+```bash
+louis1@louis1:~$ kubectl get pods -n kube-system
+NAME                             READY   STATUS    RESTARTS        AGE
+coredns-6d8c4cb4d-sxfh9          1/1     Running   0               12h
+coredns-6d8c4cb4d-x959b          1/1     Running   0               12h
+etcd-louis1                      1/1     Running   0               12h
+kube-apiserver-louis1            1/1     Running   0               12h
+kube-controller-manager-louis1   1/1     Running   1               12h
+kube-proxy-2s9vv                 1/1     Running   0               12h
+kube-scheduler-louis1            1/1     Running   1               12h
+weave-net-8r6db                  2/2     Running   1 (2m11s ago)   2m33s
+```
+
+所有的系统Pod都成功启动了，刚刚部署的Weave网络插件在kube-system下面新建了一个名叫weave-net-8r6db的Pod。**这些Pod就是容器网络插件在每个节点上的控制组件**
+
+Kubernetes支持容器网络插件，使用的是一个名叫CNI的通用接口，它也是当前容器网络的事实标准，市面上所有的容器网络开源项目都可以通过CNI接入Kubernetes，比如Flannel、Calico、Cannal、Romana等，部署方式都是类似一键部署
+
+**第四步：部署Kubernetes的Worker节点**
+
+Worker节点跟Master节点几乎相同，它们都运行一个kubelet组件
+
+唯一的区别
+
+- 在kubeadm init的过程中，当kubelet启动后，Master节点上还会自动运行kube-apiserver、kube-scheduler、kube-controller-manger这3个系统Pod
+
+部署Worker节点仅需两步
+
+- 在所有Worker节点上执行“安装kubeadm和Docker”的所有步骤
+
+- 需要在指定docker的cgroup驱动为system，跟上面master操作一样，然后再join
+
+- 执行部署Master节点时生成的kubeadm join指令
+
+  - ```bash
+    kubeadm join 10.211.55.8:6443 --token udthxc.9ujgk5o3qmcv8nfg \
+            --discovery-token-ca-cert-hash sha256:944335dedd3bca9bddce78a2464436e47096953f92d90dd11be83e7e9a5d232a 
+    ```
+
+```bash
+louis2@louis2:~$ sudo kubeadm join 10.211.55.8:6443 --token udthxc.9ujgk5o3qmcv8nfg         --discovery-token-ca-cert-hash sha256:944335dedd3bca9bddce78a2464436e47096953f92d90dd11be83e7e9a5d232a
+[preflight] Running pre-flight checks
+[preflight] Reading configuration from the cluster...
+[preflight] FYI: You can look at this config file with 'kubectl -n kube-system get cm kubeadm-config -o yaml'
+W0111 14:27:27.884473   97762 utils.go:69] The recommended value for "resolvConf" in "KubeletConfiguration" is: /run/systemd/resolve/resolv.conf; the provided value is: /run/systemd/resolve/resolv.conf
+[kubelet-start] Writing kubelet configuration to file "/var/lib/kubelet/config.yaml"
+[kubelet-start] Writing kubelet environment file with flags to file "/var/lib/kubelet/kubeadm-flags.env"
+[kubelet-start] Starting the kubelet
+[kubelet-start] Waiting for the kubelet to perform the TLS Bootstrap...
+
+This node has joined the cluster:
+* Certificate signing request was sent to apiserver and a response was received.
+* The Kubelet was informed of the new secure connection details.
+
+Run 'kubectl get nodes' on the control-plane to see this node join the cluster.
+```
+
+**第五步：通过Taint/Toleration调整Master执行Pod的策略**
+
+默认情况下Master节点是不允许运行用户Pod的，而Kubernetes做到了这一点，依靠的是它的Taint/Toleration机制
+
+原理很简单
+
+- 一旦某个节点被加上了一个Taint，即“染上污点”，那么所有Pod都不能在该节点上运行
+
+- 除非有个别Pod声明自己能“容忍”这个”污点“，即声明了Toleration，它才可以在该节点上运行
+
+- 加污点的命令``kubectl taint nodes node1 foo=bar:NoSchedule``
+
+  - ```bash
+    louis1@louis1:~$ kubectl taint nodes louis2 foo=bar:NoSchedule
+    node/louis2 tainted
+    ```
+
+  - 此时，node1节点上就会增加一个键值对格式的Taint，即foo=bar:NoSchedule
+
+  - 其中，NoSchedule意味着这个Taint只会在调度新Pod时产生作用，不会影响node1上已经在运行的Pod，哪怕它们没有声明Toleration
+
+Pod声明Toleration，**在Pod的.yaml文件中的spec部分加入tolerations字段**
+
+```bash
+spec:
+  tolerations:
+  - key: "foo"
+    operator: "Equal"
+    value: "bar"
+    effect: "NoSchedule"
+```
+
+如果只有键，没有值，则需要用Exists操作符（operator：“Exists”）来说明，该Pod能够容忍所有以foo为键的Taint，才能在该Master节点上运行这个Pod
+
+```bash
+spec:
+  tolerations:
+  - key: "foo"
+    operator: "Exists"
+    effect: "NoSchedule"
+```
+
+**如果只是想要一个单节点的Kubernetes，删除这个Taint才是正确的选择**
+
+foo是key，后面的-表示移除所有以foo为键的Taint
+
+```bash
+louis1@louis1:~$ kubectl taint nodes --all foo-
+node/louis2 untainted
+```
+
+**第六步：部署Dashboard可视化插件**
+
+官方GitHub地址:https://github.com/kubernetes/dashboard
+
+给用户提供一个可视化的Web界面来查看当前集群的各种信息
+
+```bash
+louis1@louis1:~$ kubectl apply -f https://raw.githubusercontent.com/kubernetes/dashboard/v2.3.1/aio/deploy/recommended.yaml
+namespace/kubernetes-dashboard created
+serviceaccount/kubernetes-dashboard created
+service/kubernetes-dashboard created
+secret/kubernetes-dashboard-certs created
+secret/kubernetes-dashboard-csrf created
+secret/kubernetes-dashboard-key-holder created
+configmap/kubernetes-dashboard-settings created
+role.rbac.authorization.k8s.io/kubernetes-dashboard created
+clusterrole.rbac.authorization.k8s.io/kubernetes-dashboard created
+rolebinding.rbac.authorization.k8s.io/kubernetes-dashboard created
+clusterrolebinding.rbac.authorization.k8s.io/kubernetes-dashboard created
+deployment.apps/kubernetes-dashboard created
+service/dashboard-metrics-scraper created
+Warning: spec.template.metadata.annotations[seccomp.security.alpha.kubernetes.io/pod]: deprecated since v1.19, non-functional in v1.25+; use the "seccompProfile" field instead
+deployment.apps/dashboard-metrics-scraper created
+```
+
+1.7版本之后的Dashboard项目部署后，只能通过Proxy方式在本地访问，如果需要从集群外访问的话，需要用到Ingress
+
+查看Dashboard对应Pod的状态
+
+```bash
+louis1@louis1:~$ kubectl get pods -n kubernetes-dashboard
+NAME                                         READY   STATUS    RESTARTS   AGE
+dashboard-metrics-scraper-577dc49767-l5spt   1/1     Running   0          5m2s
+kubernetes-dashboard-78f9d9744f-2bg45        1/1     Running   0          5m2s
+```
+
+**创建管理员用户**
+
+``vi admin.yaml``
+
+```bash
+# 添加以下内容 
+apiVersion: v1 
+kind: ServiceAccount 
+metadata:
+  name: admin-user
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: admin-user
+  annotations:
+    rbac.authorization.kubernetes.io/autoupdate: "true"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+- kind: ServiceAccount
+  name: admin-user
+  namespace: kube-system
+```
+
+然后执行``kubectlapply-fadmin.yaml-nkube-system``
+
+```bash
+louis1@louis1:~$ kubectl apply -f admin.yaml -n kube-system
+serviceaccount/admin-user created
+clusterrolebinding.rbac.authorization.k8s.io/admin-user created
+```
+
+配置dashboard的访问端口，将type: ClusterIP改为type: NodePort
+
+```bash
+kubectl edit svc kubernetes-dashboard -n kubernetes-dashboard
+```
+
+找到dashboard使用的端口
+
+```bash
+louis1@louis1:~$ kubectl get svc -A | grep kubernetes-dashboard
+kubernetes-dashboard   dashboard-metrics-scraper   ClusterIP   10.108.254.120   <none>        8000/TCP                 17m
+kubernetes-dashboard   kubernetes-dashboard        NodePort    10.96.164.216    <none>        443:31268/TCP            17m
+```
+
+生成登录使用的token
+
+```bash
+kubectl -n kubernetes-dashboard describe secret $(kubectl -n kubernetes-dashboard get secret | grep admin-user | awk '{print $1}')
+
+...
+token:      eyJhbGciOiJSUzI1NiIsImtpZCI6Ijc4Z1dSeWQ5aEIxSXdyR1h2LXBIU0RocHNXQmp6MVprOEFHdXYzQm93QVkifQ.eyJpc3MiOiJrdWJlcm5ldGVzL3NlcnZpY2VhY2NvdW50Iiwia3ViZXJuZXRlcy5pby9zZXJ2aWNlYWNjb3VudC9uYW1lc3BhY2UiOiJrdWJlcm5ldGVzLWRhc2hib2FyZCIsImt1YmVybmV0ZXMuaW8vc2VydmljZWFjY291bnQvc2VjcmV0Lm5hbWUiOiJrdWJlcm5ldGVzLWRhc2hib2FyZC10b2tlbi1xNm56MiIsImt1YmVybmV0ZXMuaW8vc2VydmljZWFjY291bnQvc2VydmljZS1hY2NvdW50Lm5hbWUiOiJrdWJlcm5ldGVzLWRhc2hib2FyZCIsImt1YmVybmV0ZXMuaW8vc2VydmljZWFjY291bnQvc2VydmljZS1hY2NvdW50LnVpZCI6IjY5OTZjY2JiLWNjODEtNDFjMS1iNDVkLTNiMDZhZDY3NTMzMiIsInN1YiI6InN5c3RlbTpzZXJ2aWNlYWNjb3VudDprdWJlcm5ldGVzLWRhc2hib2FyZDprdWJlcm5ldGVzLWRhc2hib2FyZCJ9.5uRJbVYC2pcJJuVWNLLzCzGnzXvrjoUdFUFnqtNwUVl5204xp8f7BgbN7GJ0dAxBqYks7v1S08FZCQ6UHe1iyFw9T-HcQHuh3OZohM7TsgO7rPFEa04nkWQfn39QejTDEGYcDAMxc1V3WSH2mfeGdxu_ZhsbVKgoCK9ndXurQts32XN-IOqzq7Lp9OmvuMqZm5Y5XjB-jUgJ4Obm7yILx_yOj6SrIkginewXPPvNMfy4KYW8-JZAi1UgrcCuTWlMNYeKRZEZrnrrbrVOxaMvhVTFsTxWK5PitRPaiZ-938Ga0lJDOp10jnyuYaa0-dXWk90O61p-xuacpfAqlPNspA
+```
+
+
+
+
+
+**换一种方式部署，使用阿里云镜像**
+
+https://cr.console.aliyun.com/cn-hangzhou/instances/images
+
+先创建yaml文件，之后用create创建``vim kubernetes-dashboard.yaml``
+
+yaml文件内容
+
+```bash
+spec:
+  replicas: 1
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      k8s-app: kubernetes-dashboard
+  template:
+    metadata:
+      labels:
+        k8s-app: kubernetes-dashboard
+    spec:
+      containers:
+      - name: kubernetes-dashboard
+        # 更改为国内的镜像        
+        image: registry.cn-hangzhou.aliyuncs.com/lynchj/kubernetes-dashboard-amd64:v1.10.0
+        ports:
+        - containerPort: 8443
+          protocol: TCP
+```
+
+然后再加个配置，还是那个yaml文件
+
+```bash
+spec:
+  type: NodePort
+  ports:
+    - port: 443
+      targetPort: 8443
+  selector:
+    k8s-app: kubernetes-dashboard
+```
+
+**报错：The connection to the server raw.githubusercontent.com was refused - did you specify the right host or port?**  
+
+原因：外网不可访问
+
+```bash
+# 在https://www.ipaddress.com/查询raw.githubusercontent.com的真实IP。
+sudo vim /etc/hosts
+185.199.108.133 raw.githubusercontent.com
+```
+
+开启IPVS，修改ConfigMap中的kube-system/kube-proxy中的模式为ipvs
+
+```bash
+kubectl edit cm kube-proxy -n kube-system  # mode: "ipvs"
+```
+
+重启kube-proxy
+
+```bash
+kubectl get pod -n kube-system | grep kube-proxy | awk '{system("kubectl delete pod "$1" -n kube-system")}'
+```
+
+**第七步：部署容器存储插件（顶不住了，真的安装不了）**
+
+因为容器是**无状态**的，所以容器的持久化存储，就是保存容器存储状态的重要手段
+
+存储插件会在容器里挂载一个基于网络或者其他机制的远程Volume，这使得在容器里创建的文件，实际上保存在远处存储服务器上，或者以分布式的方式保存在多个节点上，**与当前宿主机没有任何绑定关系**
+
+此次选择部署一个很重要的Kubernetes存储插件项目：Rook
+
+Rook项目是一个基于Ceph的Kubernetes存储插件（后期增加了对更多存储实现的支持），不同于对Ceph的简单封装，Rook在实现中加入了水平扩展、迁移、灾难备份、监控等大量的企业级功能，使得该项目变成了一个完整的、生产级别可用的容器存储插件
+
+三条命令，Rook即可完成复杂的Ceph存储后端部署（没外网，搞不来）
+
+```bash
+kubectl apply -f https://raw.githubusercontent.com/rook/rook/release-1.1/cluster/examples/kubernetes/ceph/common.yaml
+kubectl apply -f https://raw.githubusercontent.com/rook/rook/release-1.1/cluster/examples/kubernetes/ceph/operator.yaml
+kubectl apply -f https://raw.githubusercontent.com/rook/rook/release-1.1/cluster/examples/kubernetes/ceph/cluster.yaml
+```
+
+在部署后，可以看到Rook项目会将自己的Pod放置在由它自己管理的Namespace中
+
+```bash
+kubectl get pods -n rook-ceph
+```
+
+#### 4.3 第一个Kubernetes应用
+
+一个YAML文件，对应到Kubernetes中就是一个对象
+
+用指令运行起来，``kubectl create -f _我的配置文件_``
+
+yaml示例
+
+```bash
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-deployment
+spec:
+  selector:
+    matchLabels:
+      app: nginx
+  replicas: 2
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:1.7.9
+        ports:
+        - containerPort: 80
+```
+
+kind字段指定了这个API对象的类型
+
+Deployment，是一个定义多副本应用（多个副本Pod）的对象
+
+- Deployment还负责在Pod定义发生变化时，对每个副本进行滚动更新
+- spec.replicas是Pod副本个数
+
+**Pod就是Kubernetes世界里面的“应用运行单元”，而一个应用运行单元可以由多个容器组成**
+
+使用一种API对象（Deployment）管理另一种API对象（Pod）的方法，在Kubernetes中叫做“控制器模式”（controller pattern）
+
+每个API对象都有一个叫作Metadata的字段，这个字段就是API对象的“标识”，即元数据，它也是我们从Kubernetes里找到这个对象的主要依据。其中最主要的字段是Labels
+
+Labels是一组键值对格式的标签，Deployment这样的控制器对象，可以通过这个Labels字段从Kubernetes中过滤出它所关心的被控制对象
+
+- 上面的yaml，Deployment会把所有正在运行的、携带app：nginx标签的Pod识别为被管理的对象，并确保这些Pod的总数严格等于2
+- 过滤规则的定义，在Deployment的spec.selector.matchLabels字段，一般称为Label Selector
+
+在Metadata中，还有一个与Labels格式、层级完全相同的字段，叫做Annotations，**专门用来携带键值对格式的内部信息**
+
+- 内部信息，指的是对这些信息感兴趣的是Kubernetes组件，而不是用户
+- 大多数Annotations是在Kubernetes运行过程中被自动加在这个API对象上
+
+一个Kubernetes的API对象的定义，大多可以分成Metadata和Spec两个部分
+
+- 前者存放这个对象的元数据，对所有API对象来说，这部分的字段和格式基本相同
+- 后者存放的是属于这个对象独有的定义，用来描述它所要表达的功能
+
+将这个yaml文件运行起来
+
+```bash
+louis1@louis1:~$ kubectl create -f nginx-deployment.yaml 
+deployment.apps/nginx-deployment created
+```
 
