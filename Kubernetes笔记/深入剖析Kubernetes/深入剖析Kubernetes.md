@@ -1,3 +1,5 @@
+## 第一部分 Kubernetes基础
+
 ### 第二章 容器技术基础
 
 #### 2.1 从进程开始说起
@@ -836,7 +838,7 @@ token:      eyJhbGciOiJSUzI1NiIsImtpZCI6Ijc4Z1dSeWQ5aEIxSXdyR1h2LXBIU0RocHNXQmp6
 
 
 
-**换一种方式部署，使用阿里云镜像**
+**换一种方式部署，使用阿里云镜像（部署失败）**
 
 https://cr.console.aliyun.com/cn-hangzhou/instances/images
 
@@ -899,7 +901,7 @@ kubectl edit cm kube-proxy -n kube-system  # mode: "ipvs"
 kubectl get pod -n kube-system | grep kube-proxy | awk '{system("kubectl delete pod "$1" -n kube-system")}'
 ```
 
-**第七步：部署容器存储插件（顶不住了，真的安装不了）**
+**第七步：部署容器存储插件（部署失败）**
 
 因为容器是**无状态**的，所以容器的持久化存储，就是保存容器存储状态的重要手段
 
@@ -948,7 +950,8 @@ spec:
     spec:
       containers:
       - name: nginx
-        image: nginx:1.7.9
+        #image: nginx:1.7.9 如果不知道，就直接拉最新的
+        image: nginx:latest
         ports:
         - containerPort: 80
 ```
@@ -985,6 +988,673 @@ Labels是一组键值对格式的标签，Deployment这样的控制器对象，�
 
 ```bash
 louis1@louis1:~$ kubectl create -f nginx-deployment.yaml 
-deployment.apps/nginx-deployment created
+deployment.apps/nginx-deployment create
 ```
+
+如果运行坏了，使用``kubectl delete po NAME``来删除Pod
+
+```bash
+louis1@louis1:~$ kubectl get pods
+NAME                               READY   STATUS             RESTARTS      AGE
+nginx-deployment-f7ccf9478-hf5wk   0/1     CrashLoopBackOff   23 (9h ago)   12h
+nginx-deployment-f7ccf9478-rh8gp   0/1     CrashLoopBackOff   27 (9h ago)   12h
+```
+
+查看所有pod，``kubectl get pod --all-namespaces ``，然后使用命令``kubectl delete -f nginx-deployment.yaml  ``删除status不是running的pod，并不会删除原yaml文件
+
+查看一个API对象的细节
+
+```bash
+louis1@louis1:~$ kubectl describe pod nginx-deployment-8d545c96d-74qz9
+Name:         nginx-deployment-8d545c96d-74qz9
+Namespace:    default
+Priority:     0
+Node:         louis3/10.211.55.9
+Start Time:   Thu, 13 Jan 2022 02:15:45 +0000
+Labels:       app=nginx
+              pod-template-hash=8d545c96d
+Annotations:  <none>
+Status:       Running
+IP:           10.36.0.2
+IPs:
+  IP:           10.36.0.2
+Controlled By:  ReplicaSet/nginx-deployment-8d545c96d
+Containers:
+  nginx:
+    Container ID:   docker://01e41d740143987a88aea6728fc3b69b518489e4df9bcefb37fbfd3e37ef1162
+    Image:          nginx:latest
+    Image ID:       docker-pullable://nginx@sha256:0d17b565c37bcbd895e9d92315a05c1c3c9a29f762b011a10c54a66cd53c9b31
+    Port:           80/TCP
+    Host Port:      0/TCP
+    State:          Running
+      Started:      Thu, 13 Jan 2022 02:15:58 +0000
+    Ready:          True
+    Restart Count:  0
+    Environment:    <none>
+    Mounts:
+      /var/run/secrets/kubernetes.io/serviceaccount from kube-api-access-hqltp (ro)
+Conditions:
+  Type              Status
+  Initialized       True 
+  Ready             True 
+  ContainersReady   True 
+  PodScheduled      True 
+Volumes:
+  kube-api-access-hqltp:
+    Type:                    Projected (a volume that contains injected data from multiple sources)
+    TokenExpirationSeconds:  3607
+    ConfigMapName:           kube-root-ca.crt
+    ConfigMapOptional:       <nil>
+    DownwardAPI:             true
+QoS Class:                   BestEffort
+Node-Selectors:              <none>
+Tolerations:                 node.kubernetes.io/not-ready:NoExecute op=Exists for 300s
+                             node.kubernetes.io/unreachable:NoExecute op=Exists for 300s
+Events:
+  Type    Reason     Age   From               Message
+  ----    ------     ----  ----               -------
+  Normal  Scheduled  31m   default-scheduler  Successfully assigned default/nginx-deployment-8d545c96d-74qz9 to louis3
+  Normal  Pulling    31m   kubelet            Pulling image "nginx:latest"
+  Normal  Pulled     31m   kubelet            Successfully pulled image "nginx:latest" in 11.908289403s
+  Normal  Created    31m   kubelet            Created container nginx
+  Normal  Started    31m   kubelet            Started container nginx
+```
+
+其中**Events**值得特别关注，对API对象的所有重要操作都会被记录在这个对象的Evnets里，并且显示在kubectl describe指令返回的结果中
+
+如果后续要升级Nginx服务，把镜像从1.7.9升到1.8，只需要修改yaml里面的值，但是修改之后只会发生在本地，如果想要在Kubernetes里面也生效，需要使用kubectl replace
+
+- ``kubectl replace -f nginx-deployment.yaml``
+
+**推荐使用``kubectl apply``命令来统一进行Kubernetes对象的创建和更新操作**
+
+- 不论是创建还是更新，都用这个，这种面向终态的分布式系统设计原则，**被称为是“声明式API”**
+
+- ```bash
+  
+  $ kubectl apply -f nginx-deployment.yaml
+  
+  # 修改nginx-deployment.yaml的内容
+  
+  $ kubectl apply -f nginx-deployment.yaml
+  ```
+
+如果开发人员修改了应用，发布了新的发布内容，那么这个YAML文件也需要修改，并且成为这次变更的一部分，接下来，**运维人员可以使用git diff命令查看这个yaml文件本身的变化，然后使用kubectl apply命令更新这个应用**
+
+在Deployment中尝试声明一个Volume
+
+- 在Kubernetes中，Volume属于Pod对象的一部分，需要修改这个YAML文件里template.spec字段
+
+```bash
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-deployment
+spec:
+  selector:
+    matchLabels:
+      app: nginx
+  replicas: 2
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:latest
+        ports:
+        - containerPort: 80
+        volumeMounts:
+        - mountPath: "/usr/share/nginx/html"
+          name: nginx-vol
+      volumes:
+      - name: nginx-vol
+        emptyDir: {}
+```
+
+在Deployment的Pod模版部分添加了一个volumes字段，定义了这个Pod声明的所有Volume
+
+- 名字叫作nginx-vol
+- 类型是emptyDir
+  - emptyDir等同于Docker的隐式Volume参数，即不显示声明宿主机目录的Volume
+  - 所以Kubernetes也会在宿主机上创建一个临时目录，这个目录将来会被绑定挂载到容器所声明的Volume目录上
+
+**Kubernetes的emptyDIr类型只是把Kubernetes创建的临时目录作为Volume的宿主机目录，交给了Docker**
+
+- 这么做的原因，Kubernetes不想依赖Docker自己创建的那个_data目录
+
+Pod中的容器使用volumeMounts字段来声明自己要挂载到哪个Volume，并通过mountPath字段来定义容器内的Volume目录，比如``/usr/share/nginx/html``
+
+Kubernetes也提供了显示的Volume定义，叫作hostPath，这样，容器Volume挂载的宿主机目录就变成了/var/data
+
+```bash
+ ...   
+    volumes:
+      - name: nginx-vol
+        hostPath: 
+          path:  " /var/data"
+```
+
+**完成修改之后，使用kubectl apply指令来更新这个Deployment**
+
+可以使用kubectl exec指令进入这个Pod当中（容器的Namespace）中，查看这个Volume目录
+
+```bash
+louis1@louis1:~$ kubectl exec -it nginx-deployment-57b48455b4-b76c4 -- /bin/bash
+root@nginx-deployment-57b48455b4-b76c4:/# ls /usr/share/nginx/html/
+```
+
+## 第二部分 Kubernetes核心原理
+
+### 第五章 Kubernetes编排原理
+
+#### 5.1 为什么我们需要Pod
+
+**Pod是Kubernetes项目的原子调度单位**
+
+Namespace做隔离，Cgroups做限制，rootfs做文件系统
+
+容器的本质是什么？
+
+- 容器的本质是进程，容器就是这个系统里的.exe安装包
+
+- 则Kubernetes就是操作系统
+
+```bash
+louis1@louis1:~$ pstree -g
+systemd(1)─┬─accounts-daemon(873)─┬─{accounts-daemon}(873)
+           │                      └─{accounts-daemon}(873)
+           ├─atd(900)
+           ├─containerd(25994)─┬─{containerd}(25994)
+           │                   ├─{containerd}(25994)
+           │                   ├─{containerd}(25994)
+           │                   ├─{containerd}(25994)
+ ...
+           ├─networkd-dispat(886)
+           ├─polkitd(961)─┬─{polkitd}(961)
+           │              └─{polkitd}(961)
+           ├─rsyslogd(889)─┬─{rsyslogd}(889)
+           │               ├─{rsyslogd}(889)
+           │               └─{rsyslogd}(889)
+           ├─snapd(891)─┬─{snapd}(891)
+           │            ├─{snapd}(891)
+           │            ├─{snapd}(891)
+           │            ├─{snapd}(891)
+           │            ├─{snapd}(891)
+           │            ├─{snapd}(891)
+           │            ├─{snapd}(891)
+           │            ├─{snapd}(891)
+           │            ├─{snapd}(891)
+           │            ├─{snapd}(891)
+           │            ├─{snapd}(891)
+           │            ├─{snapd}(891)
+           │            └─{snapd}(891)   				├─sshd(2474)───sshd(578341)───sshd(578341)───bash(578497)───pstree(683838)
+           ├─systemd(1585)─┬─(sd-pam)(1585)
+           │               ├─dirmngr(18102)
+           │               └─gpg-agent(18106)
+           ├─systemd-journal(413)
+           ├─systemd-logind(893)
+           ├─systemd-network(835)
+           ├─systemd-resolve(837)
+           ├─systemd-timesyn(632)───{systemd-timesyn}(632)
+           ├─systemd-udevd(440)
+           ├─udisksd(895)─┬─{udisksd}(895)
+           │              ├─{udisksd}(895)
+           │              ├─{udisksd}(895)
+           │              └─{udisksd}(895)
+           └─unattended-upgr(971)───{unattended-upgr}(971)
+```
+
+在一个真正的操作系统中，进程是以进程组的方式组织在一起
+
+例如rsyslogd这个程序，它负责的是Linux操作系统中的日志处理，它是由imklog、imuxsock和main这几个线程组成的一个进程，这些线程或者说轻量级进程之间是可以共享文件、信号、数据内存甚至部分代码，从而紧密协作共同履行一个程序的职责
+
+现在假如要把这个reyslogd容器化，**由于受限于“单进程模型”**，这3个模块必须分别做成3个容器
+
+- 单进程模型并不是指容器里只能运行一个进程，而是指容器无法管理多个进程
+- 因为容器里PID=1的进程就是应用本身，它无法对里面的其他应用进行管理，假如其他进程退出之后，那么垃圾收集工作也没人做
+
+**Pod最重要的事实**
+
+- 它只是一个逻辑概念
+- Kubernetes真正处理的，还是宿主机操作系统上Linux容器的Namespace和Cgroups
+- 并不存在所谓的Pod的边界或者隔离环境
+
+**Pod其实是一组共享了某些资源的容器**
+
+- Pod里的所有容器都共享了一个Network Namespace，并且可以声明共享同一个Volume
+
+在Kubernetes项目里，Pod的实现需要使用一个中间容器，这个容器叫作Infra容器
+
+- 在这个Pod中，Infra容器永远是第一个被创建的容器
+- Pod的生命周期只跟Infra容器一致，与其他容器无关
+- 用户定义的其他容器则通过Join Network Namespace的方式与Infra容器关联在一起
+
+Infra容器占用极少的资源，使用的是特殊的镜像，叫作k8s.gcr.io/pause，这个镜像是用汇编写的、永远处于暂停状态的容器，解压后的大小只有100～200KB
+
+同一个Pod里的所有用户容器，它们的进出流量可以认为都是通过Infra容器完成的
+
+- 意味着，将来为Kubernetes开发一个网络插件，**应该重点考虑如何配置这个Pod的Network Namespace**，而不是每一个用户容器如何使用你的网络配置，这是没有意义的
+- 如果网络插件需要在容器里安装某些包或者配置才能完成，是不可取的，因为Infra容器镜像里的rootfs里几乎什么都没有
+- 也意味着网络插件完全不必关心用户容器的启动与否，只需要关注如何配置Pod，也就是Infra容器的Network Namespace即可
+
+```bash
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: two-containers
+spec:
+  restartPolicy: Never
+  volumes:
+  - name: shared-data
+    hostPath:      
+      path: /data
+  containers:
+  - name: nginx-container
+    image: nginx
+    volumeMounts:
+    - name: shared-data
+      mountPath: /usr/share/nginx/html
+  - name: debian-container
+    image: debian
+    volumeMounts:
+    - name: shared-data
+      mountPath: /pod-data
+    command: ["/bin/sh"]
+    args: ["-c", "echo Hello from the debian container > /pod-data/index.html"]
+```
+
+Debian-container和nginx-container都声明挂载了shared-data这个Volume
+
+- 而shared-data是hostPath类型，所以宿主机对应的目录就是/data
+- 实际上被绑到两个容器中
+
+Pod这种“超亲密关系”容器的设计思想，实际上是希望当用户想在一个容器里运行多个功能无关的应用时，应该优先考虑它们是否更应该被描述成一个Pod里的多个容器
+
+**1.WAR包与Web服务器**
+
+```bash
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: javaweb-2
+spec:
+  initContainers:
+  - image: geektime/sample:v2
+    name: war
+    command: ["cp", "/sample.war", "/app"]
+    volumeMounts:
+    - mountPath: /app
+      name: app-volume
+  containers:
+  - image: geektime/tomcat:7.0
+    name: tomcat
+    command: ["sh","-c","/root/apache-tomcat-7.0.42-v2/bin/start.sh"]
+    volumeMounts:
+    - mountPath: /root/apache-tomcat-7.0.42-v2/webapps
+      name: app-volume
+    ports:
+    - containerPort: 8080
+      hostPort: 8001 
+  volumes:
+  - name: app-volume
+    emptyDir: {}
+```
+
+在Pod中，所有Init Container定义的容器都会比spec.containers定义的容器先启动，**Init Container容器会按顺序逐一启动，直到它们都启动并且退出了，用户容器才会启动**
+
+**这是容器设计模式中最常用的一种模式，称为sidecar**
+
+- sidecar指的是我们可以在一个Pod中启动一个辅助容器，来完成一些独立于主进程（主容器）的工作
+
+**2.容器的日志收集**
+
+现在有一个应用，需要不断地把日志文件输出到容器的/var/log目录中，这时就可以把一个Pod里的Volume挂载到应用容器的/var/log目录上。
+
+接下来sidecar容器就需要不断地从自己的/var/log的目录里读取日志文件，转发到MongoDB或者ElasticSearch中存储起来
+
+Pod的另一个重要特性是，它的所有容器都共享同一个Network Namespace
+
+- 很多与Pod网络相关的配置和管理都可以交给sidecar完成，完全无需干涉用户容器
+
+**可以把整台虚拟机想象成一个Pod，把这些进程分别做成容器镜像，把有顺序关系的容器定义为Init Container。这才是更加合理的、松耦合的容器编排诀窍，也是从传统应用架构到微服务架构最自然的过渡方式**
+
+#### 5.2 深入解析Pod对象
+
+Pod中几个重要字段的含义和用法
+
+NodeSelector。一个供用户将Pod与Node进行绑定的字段
+
+```bash
+apiVersion: v1
+kind: Pod
+...
+spec:
+ nodeSelector:
+   disktype: ssd
+```
+
+这样的配置意味着这个Pod永远只能在携带了disktype:ssd标签的节点上运行，否则将调度失败
+
+NodeName。一旦Pod的这个字段被赋值，Kubernetes项目就会认为这个Pod已调度，调度的结果就是赋值的节点名称，**这个字段一般由调度器负责设置，但用户也可以设置它来“骗过”调度器**，一般测试或者调试的时候才会用到
+
+HostAliases。定义了Pod的hosts文件（比如/etc/hosts）里的内容
+
+```bash
+
+apiVersion: v1
+kind: Pod
+...
+spec:
+  hostAliases:
+  - ip: "10.1.2.3"
+    hostnames:
+    - "foo.remote"
+    - "bar.remote"
+...
+```
+
+如果要设置hosts文件里的内容，一定要通过这种方法，如果直接修改了hosts文件在Pod被删除重建之后，kubelet会自动覆盖被修改的内容
+
+Pod的设计就是要让其中的容器尽可能多地共享Linux Namespace，仅保留必要的隔离和限制能力
+
+例如，在这个yaml中，定义了shareProcessNamespace=true，意味着这个Pod的容器要共享PID Namespace
+
+```bash
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx
+spec:
+  shareProcessNamespace: true
+  containers:
+  - name: nginx
+    image: nginx
+  - name: shell
+    image: busybox
+    stdin: true
+    tty: true
+```
+
+在这个yaml文件里，定义了两个容器，nginx容器和开启了tty和stdin的shell容器
+
+- 开启等同于设置docker run -it（-i即stdin，-t即tty）参数
+- tty的作用是接受用户的标准输入，返回操作系统的标准输出
+- 为了能够在tty中输入信息，需要开启stdin（标准输入流）
+
+```bash
+louis1@louis1:~$ kubectl create -f nginx.yaml 
+pod/nginx created
+louis1@louis1:~$ kubectl attach -it nginx -c shell
+If you don't see a command prompt, try pressing enter.
+/ # ps ax
+PID   USER     TIME  COMMAND
+    1 65535     0:00 /pause
+    6 root      0:00 nginx: master process nginx -g daemon off;
+   36 101       0:00 nginx: worker process
+   37 101       0:00 nginx: worker process
+   38 root      0:00 sh
+   43 root      0:00 ps ax
+```
+
+凡是Pod中的容器要共享宿主机的Namespace，也一定是Pod级别的定义
+
+```bash
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx
+spec:
+  hostNetwork: true
+  hostIPC: true
+  hostPID: true
+  containers:
+  - name: nginx
+    image: nginx
+  - name: shell
+    image: busybox
+    stdin: true
+    tty: true
+```
+
+在这个Pod中，定义了共享宿主机的Network、IPC和PID Namespace，意味着这个Pod里的所有容器会直接使用宿主机的网络，直接与宿主机进行IPC通信，“看到”宿主机里正在运行的所有进程
+
+**Containers的重要属性**
+
+ImagePullPolicy字段。定义了镜像拉取的策略
+
+- 默认值是Always，即每次创建Pod都重新拉取一次镜像
+- 当容器的镜像是类似于nginx或者nginx：lastest的时候，也会认为是always
+- 当它的值被定义为Never字段或者IfNotPresent，则意味着Pod永远不会主动拉取这个镜像，或者只在宿主机上不存在这个镜像时才拉取
+
+ Lifecycle字段。定义的是Container Lifecycle Hooks，作用是在容器状态发生变化的时候触发一系列“钩子”
+
+```bash
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: lifecycle-demo
+spec:
+  containers:
+  - name: lifecycle-demo-container
+    image: nginx
+    lifecycle:
+      postStart:
+        exec:
+          command: ["/bin/sh", "-c", "echo Hello from the postStart handler > /usr/share/message"]
+      preStop:
+        exec:
+          command: ["/usr/sbin/nginx","-s","quit"]
+```
+
+- postStart，指的是在容器启动后立刻执行一个指定操作
+  - postStart定义的操作虽然是在Docker容器ENTERYPOINT执行之后，但是不保证顺序，在postStart启动时，ENTERYPOINT有可能尚未结束
+  - 如果postStart执行超时或者出错，Kubernetes会在该Pod的Events中报出该容器启动失败的错误信息，导致Pod也处于失败状态
+- preStop发生的时机则是容器被结束之前（比如收到了SIGKILL信号）
+- preStop操作的执行时同步的，**所以它会阻塞当前的容器结束流程，直到这个Hook定义操作完成之后，才允许容器被结束**，实现优雅退出
+
+**Pod生命周期的变化主要体现在Pod API对象的Status部分**，这时它除Metadata和Spec外的第三个重要字段
+
+- pod.status.phase就是Pod当前状态
+  - Pending。Pod的YAML文件已经提交给了Kubernetes，API对象已经被创建并保存到etcd当中，但是这个Pod里面有些容器不能被顺序创建，例如调度不成功
+  - Running。Pod调度成功，跟一个具体的节点绑定。包含的容器都创建成功，至少有一个正在运行
+  - Succeeded。意味着Pod里所有容器都正常运行完毕，并且成功退出了，这种情况在运行与创新任务时最为常见
+  - Failed。Pod里至少有一个容器以不正常的状态（非0的返回码）退出，出现这个状况要想办法调试这个容器的应用，比如查看Pod的Events和日志
+  - Unknown。异常状态，意味着Pod的状态不能持续地被kubelet汇报给kube-apiserver，很可能是主从节点（Master和kubelet）间的通信出现了问题
+
+更进一步，Pod对象的Status字段还可以细分一组Conditions，主要用于描述造成当前Status的具体原因是什么
+
+- PodScheduled
+- Ready
+- Initialized
+- Unshcedulable
+
+#### 5.3 Pod对象使用进阶
+
+在Kubernetes中有几种特殊的Volume，它们存在的意义不是为了存放容器里的数据，也不是用于容器和宿主机之间的数据交换，而是为容器提供预先定义好的数据。
+
+**从容器来看，这些Volume里的信息就仿佛是被Kubernetes“投射”进入容器中的，这正是Projected Volume的含义**
+
+**1.Secret**
+
+- 作用是把Pod想要访问的加密数据存放到etcd中
+- 后续就可以通过在Pod的容器里挂载Volume的方式访问这些Secret里保存的信息了
+
+Secret最典型的场景，存放数据库的Credential信息
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-projected-volume
+spec:
+  containers:
+  - name: test-secret-volume
+    image: busybox
+    args:
+    - sleep
+    - "86400"
+    volumeMounts:
+    - name: mysql-cred
+      mountPath: "/projected-volume"
+      readOnly: true
+  volumes:
+  - name: mysql-cred
+    projected:
+      sources:
+      - secret:
+          name: mysecret
+```
+
+这个Volume的数据来源。则是名为user和pass的Secret对象，分别对应数据库的用户名和密码
+
+```bash
+$ cat ./username.txt
+admin
+$ cat ./password.txt
+c1oudc0w!
+
+$ kubectl create secret generic user --from-file=./username.txt
+$ kubectl create secret generic pass --from-file=./password.txt
+```
+
+如果想查看Secret对象，只需要执行``kubectl get secrets``
+
+除了使用kubectl create secret指令，也可以直接编写yaml文件来创建这个secret对象
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mysecret
+type: Opaque
+data:
+  user: YWRtaW4=
+  pass: MWYyZDFlMmU2N2Rm
+```
+
+里面的数据必须是base64转码后的，避免明文
+
+```bash
+$ echo -n 'admin' | base64
+YWRtaW4=
+$ echo -n '1f2d1e2e67df' | base64
+MWYyZDFlMmU2N2Rm
+```
+
+当Pod变成Running之后，验证这些Secret对象是否已经在容器里
+
+```bash
+louis1@louis1:~$ kubectl exec -it test-projected-volume -- /bin/sh
+/ # ls /projected-volume/
+pass  user
+/ # cat  /projected-volume/user
+/ # cat  /projected-volume/pass
+1f2d1e2e67df/
+```
+
+保存在etcd里的用户名和密码信息已经以文件的形式出现在容器的Volume目录里了。这个文件名称就是kubectl create secret指定的key，**或者说是Secret对象的data字段指定的key**
+
+- 像这样通过挂载方式进入容器的Secret，一旦其对应的etcd数据更新，这些Volume里的文件内容也会更新，**kubelet组件在定时维护这些Volume**
+- 这个更新可能会有一定的延时，**所以在编写应用程序时，在发起数据库连接的代码处写好重试和超时的逻辑，绝对是好习惯！**
+
+**2.ConfigMap**
+
+与Secret类似，区别在于ConfigMap保存的是无须加密的、应用所需的配置信息，用法与Secret完全相同
+
+- 可以使用kubectl create configmap从文件或者目录创建ConfigMap
+- 也可以直接编写ConfigMap对象的YAML文件
+
+例如Java应用所需的配置文件，就可以保存在ConfigMap中
+
+```bash
+
+# .properties文件的内容
+$ cat example/ui.properties
+color.good=purple
+color.bad=yellow
+allow.textmode=true
+how.nice.to.look=fairlyNice
+
+# 从.properties文件创建ConfigMap
+$ kubectl create configmap ui-config --from-file=example/ui.properties
+
+# 查看这个ConfigMap里保存的信息(data)
+$ kubectl get configmaps ui-config -o yaml
+apiVersion: v1
+data:
+  ui.properties: |
+    color.good=purple
+    color.bad=yellow
+    allow.textmode=true
+    how.nice.to.look=fairlyNice
+kind: ConfigMap
+metadata:
+  name: ui-config
+  ...
+```
+
+注意，kubectl get -o yaml这样的参数会将指定的Pod API对象以YAML的方式展示出来
+
+**3.Downward API**
+
+作用是让Pod里的容器能够直接获取这个Pod API对象本身的信息
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-downwardapi-volume
+  labels:
+    zone: us-est-coast
+    cluster: test-cluster1
+    rack: rack-22
+spec:
+  containers:
+    - name: client-container
+      image: k8s.gcr.io/busybox
+      command: ["sh", "-c"]
+      args:
+      - while true; do
+          if [[ -e /etc/podinfo/labels ]]; then
+            echo -en '\n\n'; cat /etc/podinfo/labels; fi;
+          sleep 5;
+        done;
+      volumeMounts:
+        - name: podinfo
+          mountPath: /etc/podinfo
+          readOnly: false
+  volumes:
+    - name: podinfo
+      projected:
+        sources:
+        - downwardAPI:
+            items:
+              - path: "labels"
+                fieldRef:
+                  fieldPath: metadata.labels
+```
+
+Volume的数据来源变成了Downward API，这个Downward API Volume声明了要暴露Pod的metadata.labels信息给容器
+
+当前Pod的Labels字段的值被Kubernetes自动挂载成容器里的/etc/podinfo/labels文件
+
+```bash
+$ kubectl create -f dapi-volume.yaml
+$ kubectl logs test-downwardapi-volume
+cluster="test-cluster1"
+rack="rack-22"
+zone="us-est-coast"
+```
+
+**在使用Downward API时，要查阅官方文档**
+
+Downward API能够获取的信息一定是Pod里的容器进程启动之前就能确定下来的信息，如果想获取Pod容器运行后的信息，比如容器进程的PID，**那么就应该考虑在Pod里定义一个sidecar**
+
+**4.ServiceAccountToken**
 
