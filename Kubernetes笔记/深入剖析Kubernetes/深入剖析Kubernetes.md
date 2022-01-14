@@ -1658,3 +1658,261 @@ Downward API能够获取的信息一定是Pod里的容器进程启动之前就�
 
 **4.ServiceAccountToken**
 
+Service account：从Pod里面调用k8s API来控制集群
+
+Service Account的授权信息和文件，实际上保存在它所绑定的一个特殊的Secret对象里。这个特殊的对象叫作ServiceAccountToken
+
+**任何运行在 Kubernetes 集群上的应用，都必须使用这个 ServiceAccountToken 里保存的授权信息，也就是 Token，才可以合法地访问 API Server。**
+
+Kubernetes 已经提供了一个默认“服务账户”（default Service Account）
+
+- 任何一个运行在 Kubernetes 里的 Pod，都可以直接使用这个默认的 Service Account，而无需显示地声明挂载它
+
+Kubernetes 其实在每个 Pod 创建的时候，自动在它的 spec.volumes 部分添加上了默认 ServiceAccountToken 的定义，然后自动给每个容器加上了对应的 volumeMounts 字段。**这个过程对于用户来说是完全透明的**
+
+**这种把 Kubernetes 客户端以容器的方式运行在集群里，然后使用 default Service Account 自动授权的方式，被称作“InClusterConfig”，也是最推荐的进行 Kubernetes API 编程的授权方式。**
+
+ Pod 的另一个重要的配置：容器健康检查和恢复机制
+
+- Pod 里的容器定义一个健康检查“探针”（Probe）
+- kubelet 就会根据这个 Probe 的返回值决定这个容器的状态，而不是直接以容器镜像是否运行（来自 Docker 返回的信息）作为依据
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    test: liveness
+  name: test-liveness-exec
+spec:
+  containers:
+  - name: liveness
+    image: busybox
+    args:
+    - /bin/sh
+    - -c
+    - touch /tmp/healthy; sleep 30; rm -rf /tmp/healthy; sleep 600
+    livenessProbe:
+      exec:
+        command:
+        - cat
+        - /tmp/healthy
+      initialDelaySeconds: 5
+      periodSeconds: 5
+```
+
+```bash
+louis1@louis1:~$ kubectl create -f test-liveness-exec.yaml 
+pod/test-liveness-exec created
+
+louis1@louis1:~$ kubectl get pod
+NAME                                READY   STATUS        RESTARTS      AGE
+nginx                               2/2     Terminating   1 (23h ago)   26h
+nginx-deployment-57b48455b4-2xgtr   0/1     Pending       0             4m26s
+nginx-deployment-57b48455b4-86xq7   0/1     Pending       0             4m16s
+nginx-deployment-57b48455b4-b76c4   1/1     Terminating   0             31h
+nginx-deployment-57b48455b4-s4vkc   1/1     Terminating   0             31h
+test-liveness-exec                  0/1     Pending       0             5s
+test-projected-volume               1/1     Terminating   0             22h
+
+louis1@louis1:~$ kubectl describe pod test-liveness-exec
+...
+Events:
+  Type     Reason            Age                    From               Message
+  ----     ------            ----                   ----               -------
+  ...
+  Warning  Unhealthy         20h (x6 over 20h)      kubelet            Liveness probe failed: cat: can't open '/tmp/healthy': No such file or directory
+  Normal   Killing           20h (x2 over 20h)      kubelet            Container liveness failed liveness probe, will be restarted
+```
+
+Pod 并没有进入 Failed 状态，而是保持了 Running 状态
+
+RESTARTS字段从0变成了1，这个异常的容器已经被 Kubernetes 重启了。在这个过程中，Pod 保持 Running 状态不变。
+
+这个功能就是 Kubernetes 里的 Pod 恢复机制，也叫 restartPolicy。
+
+- 它是 Pod 的 Spec 部分的一个标准字段（pod.spec.restartPolicy），默认值是 Always，
+- 即：任何时候这个容器发生了异常，它一定会被重新创建。
+
+**一旦一个 Pod 与一个节点（Node）绑定，除非这个绑定发生了变化（pod.spec.node 字段被修改），否则它永远都不会离开这个节点**
+
+- 这也就意味着，如果这个宿主机宕机了，这个 Pod 也不会主动迁移到其他节点上去。
+- 而如果想让 Pod 出现在其他的可用节点上，就必须使用 Deployment 这样的“控制器”来管理 Pod，哪怕只需要一个 Pod 副本
+
+作为用户，还可以通过设置restartPolicy，改变Pod的恢复策略
+
+- Always：在任何情况下，只要容器不在运行状态，就自动重启容器
+- OnFailure: 只在容器 异常时才自动重启容器
+- Never: 从来不重启容器
+
+restartPolicy 和 Pod 里容器的状态，以及 Pod 状态的对应关系，**只需要记住两个基本的设计原理**
+
+- **只要 Pod 的 restartPolicy 指定的策略允许重启异常的容器（比如：Always），那么这个 Pod 就会保持 Running 状态，并进行容器重启。**否则，Pod 就会进入 Failed 状态
+- **对于包含多个容器的 Pod，只有它里面所有的容器都进入异常状态后，Pod 才会进入 Failed 状态。**在此之前，Pod都是Running 状态。
+
+所以，假如一个 Pod 里只有一个容器，然后这个容器异常退出了。那么，只有当 restartPolicy=Never 时，这个 Pod 才会进入 Failed 状态。而其他情况下，由于 Kubernetes 都可以重启这个容器，所以 Pod 的状态保持 Running 不变。
+
+**除了在容器中执行命令外，livenessProbe 也可以定义为发起 HTTP 或者 TCP 请求的方式**
+
+```yaml
+...
+livenessProbe:
+     httpGet:
+       path: /healthz
+       port: 8080
+       httpHeaders:
+       - name: X-Custom-Header
+         value: Awesome
+       initialDelaySeconds: 3
+       periodSeconds: 3
+```
+
+```yaml
+    ...
+    livenessProbe:
+      tcpSocket:
+        port: 8080
+      initialDelaySeconds: 15
+      periodSeconds: 20
+```
+
+Pod 其实可以暴露一个健康检查 URL（比如 /healthz），或者直接让健康检查去检测应用的监听端口。这两种配置方法，在 Web 服务类的应用中非常常用。
+
+**Kubernetes 能不能自动给 Pod 填充某些字段呢？**
+
+- 可以
+
+运维人员可以定义一个 PodPreset 对象。在这个对象中，凡是他想在开发人员编写的 Pod 里追加的字段，都可以预先定义好
+
+```yaml
+apiVersion: settings.k8s.io/v1alpha1
+kind: PodPreset
+metadata:
+  name: allow-database
+spec:
+  selector:
+    matchLabels:
+      role: frontend
+  env:
+    - name: DB_PORT
+      value: "6379"
+  volumeMounts:
+    - mountPath: /cache
+      name: cache-volume
+  volumes:
+    - name: cache-volume
+      emptyDir: {}
+```
+
+在这个 PodPreset 的定义中，首先是一个 selector。这就意味着后面这些追加的定义，只会作用于 selector 所定义的、带有“role: frontend”标签的 Pod 对象，这就可以防止“误伤”。
+
+开发人员的yaml
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: website
+  labels:
+    app: website
+    role: frontend
+spec:
+  containers:
+    - name: website
+      image: nginx
+      ports:
+        - containerPort: 80
+```
+
+运维人员先创建这个PodPreset，然后开发人员才创建Pod
+
+```bash
+kubectl create -f preset.yaml
+kubectl create -f pod.yaml
+
+然后查看Pod的API对象
+kubectl get pod website -o yaml
+```
+
+如果create preset.yaml出错，尝试下面这个，然后重启systemctl restart kubelet（试过还是无效，以后再来弄）
+
+**破案了**
+
+**PodPreset API 从k8s v1.20后被remove了： The v1alpha1 PodPreset API and admission plugin has been removed with no built-in replacement. Admission webhooks can be used to modify pods on creation.**
+
+```bash
+# 别改，改了之后kubectl直接G了
+vi /etc/kubernetes/manifests/kube-apiserver.yaml
+#增加这一行
+- --runtime-config=settings.k8s.io/v1alpha1=true
+#在下一行后面增加",PodPreset"
+- --enable-admission-plugins=NodeRestrictio
+```
+
+**PodPreset 里定义的内容，只会在 Pod API 对象被创建之前追加在这个对象本身上，而不会影响任何 Pod 的控制器的定义。**
+
+如果定义了同时作用于一个 Pod 对象的多个 PodPreset，会发生什么呢？
+
+- Kubernetes 项目会帮你合并（Merge）这两个 PodPreset 要做的修改。而如果它们要做的修改有冲突的话，这些冲突字段就不会被修改。
+
+#### 5.4 编排确实很简单：谈谈“控制器”思想
+
+Pod 这个看似复杂的 API 对象，实际上就是对容器的进一步抽象和封装而已。
+
+controller-manager 组件负责管理 Pod 的调度和控制
+
+```bash
+$ cd kubernetes/pkg/controller/
+$ ls -d */              
+deployment/             job/                    podautoscaler/          
+cloud/                  disruption/             namespace/              
+replicaset/             serviceaccount/         volume/
+cronjob/                garbagecollector/       nodelifecycle/          replication/            statefulset/            daemon/
+...
+```
+
+这个目录下面的每一个控制器，都以独有的方式负责某种编排功能。而我们的 Deployment，正是这些控制器中的一种。
+
+**它们都遵循 Kubernetes 项目中的一个通用编排模式，即：控制循环（control loop）**
+
+```bash
+for {
+  实际状态 := 获取集群中对象X的实际状态（Actual State）
+  期望状态 := 获取集群中对象X的期望状态（Desired State）
+  if 实际状态 == 期望状态{
+    什么都不做
+  } else {
+    执行编排动作，将实际状态调整为期望状态
+  }
+}
+```
+
+实际状态数据来源： 
+
+- kubelet通过心跳汇报 
+- 监控系统中保存的应用监控数据 
+- 控制器自己收集
+
+期望状态，一般来自于用户提交的 YAML 文件。
+
+以 Deployment 为例，描述它对控制器模型的实现：
+
+- Deployment 控制器从 Etcd 中获取到所有携带了“app: nginx”标签的 Pod，然后统计它们的数量，这就是实际状态；
+- Deployment 对象的 Replicas 字段的值就是期望状态；
+- Deployment 控制器将两个状态做比较，然后根据比较结果，确定是创建 Pod，还是删除已有的 Pod
+
+**这个操作，通常被叫作调谐（Reconcile）。这个调谐的过程，则被称作“Reconcile Loop”（调谐循环）或者“Sync Loop”（同步循环）。**
+
+Deployment 定义的 template 字段，在 Kubernetes 项目中有一个专有的名字，**叫作 PodTemplate（Pod 模板）**
+
+类似 Deployment 这样的一个控制器，实际上都是由上半部分的控制器定义（包括期望状态），加上下半部分的被控制对象的模板组成的。
+
+#### 5.5 经典PaaS的记忆：作业副本与水平扩展
+
+Deployment实现了Kubernetes项目中Pod的“水平扩展 / 收缩”（horizontal scaling out/in），“滚动更新”（rolling update）的方式，来升级现有的容器。
+
+这个能力的实现，依赖的是 Kubernetes 项目中的一个非常重要的概念（API 对象）：ReplicaSet。
+
+————————————————————————
+
+休息一段时间，暂时不看这本书了
