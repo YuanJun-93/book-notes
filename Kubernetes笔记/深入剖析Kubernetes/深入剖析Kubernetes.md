@@ -553,8 +553,6 @@ cgroupDriver: systemd
 sudo systemctl restart kubelet 
 ```
 
-
-
 init成功之后生成的token
 
 ```bash

@@ -1,3 +1,5 @@
+## 先看目录
+
 ## 环境搭建
 
 **CentOS7 支持M1芯片下载地址**
@@ -965,6 +967,8 @@ IP地址，因为经济跟不上，所以他们不在同一个网段，分三个
 124.223.83.132  10.0.4.10
 # Node01
 8.140.155.94    172.28.38.65/20
+# Node02
+47.102.120.99   172.28.166.106/20
 ```
 
 话不多说，直接开装
@@ -1081,6 +1085,7 @@ cat >> /etc/hosts << EOF
 124.223.119.35 k8s-master02 #同理
 124.223.83.132 k8s-master03 #同理
 8.140.155.94 k8s-node01
+47.102.120.99 Wyl
 EOF
 
 modprobe br_netfilter
@@ -1240,13 +1245,14 @@ chmod +x pullimages.sh && ./pullimages.sh
 124.223.119.35 k8s-master02 #同理
 124.223.83.132 k8s-master03 #同理
 8.140.155.94 k8s-node01
+47.102.120.99 k8s-node2
 ```
 
 ```bash
 cat > /etc/sysconfig/network-scripts/ifcfg-eth0:1 <<EOF
 BOOTPROTO=static
 DEVICE=eth0:1
-IPADDR=8.140.155.94 #你的公网IP
+IPADDR=47.102.120.99 #你的公网IP
 PREFIX=32
 TYPE=Ethernet
 USERCTL=no
@@ -1268,7 +1274,7 @@ EnvironmentFile=-/var/lib/kubelet/kubeadm-flags.env
 # the .NodeRegistration.KubeletExtraArgs object in the configuration files instead. KUBELET_EXTRA_ARGS should be sourced from this file.
 EnvironmentFile=-/etc/sysconfig/kubelet
 ExecStart=
-ExecStart=/usr/bin/kubelet $KUBELET_KUBECONFIG_ARGS $KUBELET_CONFIG_ARGS $KUBELET_KUBEADM_ARGS $KUBELET_EXTRA_ARGS --node-ip=8.140.155.94
+ExecStart=/usr/bin/kubelet $KUBELET_KUBECONFIG_ARGS $KUBELET_CONFIG_ARGS $KUBELET_KUBEADM_ARGS $KUBELET_EXTRA_ARGS --node-ip=47.102.120.99
 ```
 
 #### 使用kubeadm初始化主节点
@@ -1341,7 +1347,7 @@ sudo systemctl daemon-reload
 sudo systemctl restart docker
 ```
 
-kubelet也要搞一下
+kubelet也要搞一下，init之后才有这个文件，其他节点跳过这步
 
 ```bash
 sudo vi /var/lib/kubelet/config.yaml
@@ -1538,5 +1544,388 @@ The connection to the server localhost:8080 was refused - did you specify the ri
 ```bash
 echo "export KUBECONFIG=/etc/kubernetes/admin.conf" >> ~/.bash_profile
 source ~/.bash_profile
+```
+
+**kubeadm token过期**
+
+重新生成token
+
+```bash
+[root@k8s-master01 ~]# kubeadm token create
+jv5m8n.qpnt5wcs68dwyum0
+```
+
+获取CA证书sha256编码hash值
+
+```bash
+[root@k8s-master01 ~]# openssl x509 -pubkey -in /etc/kubernetes/pki/ca.crt | openssl rsa -pubin -outform der 2>/dev/null | openssl dgst -sha256 -hex | sed 's/^.* //'
+c50e5c9ab05a24cffc1756bd47ec4e617279244840d69a46a287071a5dc61f92
+```
+
+新节点加入集群
+
+```bash
+# --skip-preflight-checks 跳过与检查（可选）
+kubeadm join ip:port --token jv5m8n.qpnt5wcs68dwyum0 --discovery-token-ca-cert-hash sha256:c50e5c9ab05a24cffc1756bd47ec4e617279244840d69a46a287071a5dc61f92
+```
+
+#### 修改flannel文件并安装（master节点）
+
+下载文件
+
+```bash
+wget https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yaml
+```
+
+大概200行的位置，修改一下参数
+
+```bash
+containers:
+    195       - name: kube-flannel
+    196        #image: flannelcni/flannel:v0.16.3 for ppc64le and mips64le (dockerhub li        mitations may apply)
+    197         image: rancher/mirrored-flannelcni-flannel:v0.16.3
+    198         command:
+    199         - /opt/bin/flanneld
+    200         args:
+    201         - --ip-masq
+    202         - --public-ip=$(PUBLIC_IP) #添加，申明公网IP
+    203         - --iface=eth0 #添加，绑定网卡
+    204         - --kube-subnet-mgr
+```
+
+210多行再修改一个env
+
+```yaml
+    216         env:
+    217         - name: PUBLIC_IP # 添加环境变量
+    218           valueFrom: # 添加
+    219             fieldRef: # 添加
+    220               fieldPath: status.podIP # 添加
+    221         - name: POD_NAME
+    222           valueFrom:
+    223             fieldRef:
+    224               fieldPath: metadata.name
+    225         - name: POD_NAMESPACE
+    226           valueFrom:
+    227             fieldRef:
+    228               fieldPath: metadata.namespace
+    229         volumeMounts:
+    230         - name: run
+    231           mountPath: /run/flannel
+    232         - name: flannel-cfg
+    233           mountPath: /etc/kube-flannel/
+    234         - name: xtables-lock
+    235           mountPath: /run/xtables.lock
+```
+
+**直接复制粘贴替换源文件也可以**
+
+```yaml
+---
+apiVersion: policy/v1beta1
+kind: PodSecurityPolicy
+metadata:
+  name: psp.flannel.unprivileged
+  annotations:
+    seccomp.security.alpha.kubernetes.io/allowedProfileNames: docker/default
+    seccomp.security.alpha.kubernetes.io/defaultProfileName: docker/default
+    apparmor.security.beta.kubernetes.io/allowedProfileNames: runtime/default
+    apparmor.security.beta.kubernetes.io/defaultProfileName: runtime/default
+spec:
+  privileged: false
+  volumes:
+  - configMap
+  - secret
+  - emptyDir
+  - hostPath
+  allowedHostPaths:
+  - pathPrefix: "/etc/cni/net.d"
+  - pathPrefix: "/etc/kube-flannel"
+  - pathPrefix: "/run/flannel"
+  readOnlyRootFilesystem: false
+  # Users and groups
+  runAsUser:
+    rule: RunAsAny
+  supplementalGroups:
+    rule: RunAsAny
+  fsGroup:
+    rule: RunAsAny
+  # Privilege Escalation
+  allowPrivilegeEscalation: false
+  defaultAllowPrivilegeEscalation: false
+  # Capabilities
+  allowedCapabilities: ['NET_ADMIN', 'NET_RAW']
+  defaultAddCapabilities: []
+  requiredDropCapabilities: []
+  # Host namespaces
+  hostPID: false
+  hostIPC: false
+  hostNetwork: true
+  hostPorts:
+  - min: 0
+    max: 65535
+  # SELinux
+  seLinux:
+    # SELinux is unused in CaaSP
+    rule: 'RunAsAny'
+---
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: flannel
+rules:
+- apiGroups: ['extensions']
+  resources: ['podsecuritypolicies']
+  verbs: ['use']
+  resourceNames: ['psp.flannel.unprivileged']
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - get
+- apiGroups:
+  - ""
+  resources:
+  - nodes
+  verbs:
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - nodes/status
+  verbs:
+  - patch
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: flannel
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: flannel
+subjects:
+- kind: ServiceAccount
+  name: flannel
+  namespace: kube-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: flannel
+  namespace: kube-system
+---
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: kube-flannel-cfg
+  namespace: kube-system
+  labels:
+    tier: node
+    app: flannel
+data:
+  cni-conf.json: |
+    {
+      "name": "cbr0",
+      "cniVersion": "0.3.1",
+      "plugins": [
+        {
+          "type": "flannel",
+          "delegate": {
+            "hairpinMode": true,
+            "isDefaultGateway": true
+          }
+        },
+        {
+          "type": "portmap",
+          "capabilities": {
+            "portMappings": true
+          }
+        }
+      ]
+    }
+  net-conf.json: |
+    {
+      "Network": "10.244.0.0/16",
+      "Backend": {
+        "Type": "vxlan"
+      }
+    }
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: kube-flannel-ds
+  namespace: kube-system
+  labels:
+    tier: node
+    app: flannel
+spec:
+  selector:
+    matchLabels:
+      app: flannel
+  template:
+    metadata:
+      labels:
+        tier: node
+        app: flannel
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/os
+                operator: In
+                values:
+                - linux
+      hostNetwork: true
+      priorityClassName: system-node-critical
+      tolerations:
+      - operator: Exists
+        effect: NoSchedule
+      serviceAccountName: flannel
+      initContainers:
+      - name: install-cni
+        image: quay.io/coreos/flannel:v0.14.0
+        command:
+        - cp
+        args:
+        - -f
+        - /etc/kube-flannel/cni-conf.json
+        - /etc/cni/net.d/10-flannel.conflist
+        volumeMounts:
+        - name: cni
+          mountPath: /etc/cni/net.d
+        - name: flannel-cfg
+          mountPath: /etc/kube-flannel/
+      containers:
+      - name: kube-flannel
+        image: quay.io/coreos/flannel:v0.14.0
+        command:
+        - /opt/bin/flanneld
+        args:
+        - --ip-masq
+        - --public-ip=$(PUBLIC_IP) 
+        - --iface=eth0             
+        - --kube-subnet-mgr
+        args:
+        - --ip-masq
+        - --kube-subnet-mgr
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "50Mi"
+          limits:
+            cpu: "100m"
+            memory: "50Mi"
+        securityContext:
+          privileged: false
+          capabilities:
+            add: ["NET_ADMIN", "NET_RAW"]
+        env:
+        - name: PUBLIC_IP     
+          valueFrom:          
+            fieldRef:          
+              fieldPath: status.podIP
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        volumeMounts:
+        - name: run
+          mountPath: /run/flannel
+        - name: flannel-cfg
+          mountPath: /etc/kube-flannel/
+      volumes:
+      - name: run
+        hostPath:
+          path: /run/flannel
+      - name: cni
+        hostPath:
+          path: /etc/cni/net.d
+      - name: flannel-cfg
+        configMap:
+          name: kube-flannel-cfg
+```
+
+创建flannel
+
+```bash
+[root@k8s-master01 ~]# kubectl apply -f kube-flannel.yml 
+Warning: policy/v1beta1 PodSecurityPolicy is deprecated in v1.21+, unavailable in v1.25+
+podsecuritypolicy.policy/psp.flannel.unprivileged created
+clusterrole.rbac.authorization.k8s.io/flannel created
+clusterrolebinding.rbac.authorization.k8s.io/flannel created
+serviceaccount/flannel created
+configmap/kube-flannel-cfg created
+error: error parsing kube-flannel.yml: error converting YAML to JSON: yaml: line 70: found a tab character that violates indentation
+```
+
+手动开启配置，开启ipvs转发模式（master节点）
+
+```bash
+kubectl edit configmaps -n kube-system kube-proxy
+....
+    ipvs:
+      excludeCIDRs: null
+      minSyncPeriod: 0s
+      scheduler: ""
+      strictARP: false
+      syncPeriod: 0s
+      tcpFinTimeout: 0s
+      tcpTimeout: 0s
+      udpTimeout: 0s
+    kind: KubeProxyConfiguration
+    metricsBindAddress: ""
+    mode: "ipvs" # 修改
+    nodePortAddresses: null
+    oomScoreAdj: null
+    portRange: ""
+    showHiddenMetricsForVersion: ""
+    udpIdleTimeout: 0s
+....
+```
+
+## Prometheus
+
+### 官方文档
+
+https://github.com/prometheus-operator/kube-prometheus/
+
+在下面的readme中找到对应的版本，然后点进去下载
+
+https://github.com/prometheus-operator/kube-prometheus/tree/release-0.10
+
+### 开始安装
+
+```bash
+git clone -b release-0.10 https://github.com/prometheus-operator/kube-prometheus.git
+```
+
+```bash
+# 如果没有下载git，现在下载git，然后配置一下
+yum install -y git
+git config --global user.name "Your Name"
+git config --global user.email "email@example.com"
+```
+
+创建operator
+
+```bash
+cd kube-prometheus/manifests/
+kubectl create -f setup/
+```
+
+查看创建的operator
+
+```bash
+kubectl get po -n monitoring
 ```
 
